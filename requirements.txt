@@ -1,0 +1,6 @@
+mne
+PyYAML
+tabulate
+prettytable
+numpy
+matplotlib

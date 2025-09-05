@@ -1,0 +1,20 @@
+pre_stim_path: data/TUS/EEG 3_EPOCX_218863_2025.08.28T10.58.26+12.00.edf
+post_stim_path: data/TUS/EEG 4_EPOCX_218863_2025.08.28T11.31.55+12.00.edf
+montage: standard_1020      # Electrode configuration
+window_length: 8.0          # [s]
+overlap: 0.0                # [s]
+channels:                   # EEG channels to pick
+  - AF3
+  - F7
+  - F3
+  - FC5
+  - T7
+  - P7
+  - O1
+  - O2
+  - P8
+  - T8
+  - FC6
+  - F4
+  - F8
+  - AF4
