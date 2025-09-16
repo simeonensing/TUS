@@ -4,3 +4,8 @@ tabulate
 prettytable
 numpy
 matplotlib
+typing
+pywavelets
+PyQt5
+joblib
+tqdm

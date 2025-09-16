@@ -2,11 +2,11 @@ from types import MappingProxyType
 from typing import Final
 
 _CANONICAL_BANDS = {
-    "delta": (1, 3),
-    "theta": (4, 7),
+    "delta": (1, 4),
+    "theta": (4, 8),
     "alpha": (8, 12),
-    "beta":  (13, 30),
-    "gamma": (31, 45),
+    "beta":  (12, 30),
+    "gamma": (30, 45),
 }
 CANONICAL_BANDS: Final = MappingProxyType(_CANONICAL_BANDS)  # read-only view
 
