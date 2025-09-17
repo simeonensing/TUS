@@ -105,18 +105,10 @@ def main():
         sfreq=sfreq, expected_minutes=20, prefer_expected=True, warn_label="ACTIVE"
     )
 
-    # ---- Baseline drift printout
-    eps = 1e-20
-    Ppre_s_mean = Ppre_s.mean(axis=-1)
-    Ppre_a_mean = Ppre_a.mean(axis=-1)
-    baseline_db = 10.0 * np.log10((Ppre_a_mean + eps) / (Ppre_s_mean + eps))
-    print("[baseline drift] median dB shift per channel (pre_active vs pre_sham):")
-    for ch, val in zip(ch_names, np.median(baseline_db, axis=1)):
-        print(f"  {ch:>4}: {val:+.2f} dB")
-
     # ==========================================
     # POWER maps + effects (with progress)
     # ==========================================
+    eps = 1e-20
     with TQDM(total=8, desc="POWER maps + effects — setup", unit="step") as pbar:
         RP_sham_ch_pct, RP_active_ch_pct = relative_power_per_channel(Ppre_s, Ppre_a, eps=eps); pbar.update(1)
         dSHAM_tf   = 10.0 * np.log10((Ppost_s + eps) / (Ppre_s + eps)); pbar.update(1)
