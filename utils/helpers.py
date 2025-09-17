@@ -12,15 +12,92 @@ from mne.time_frequency import tfr_array_morlet
 import yaml
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from prettytable import PrettyTable, SINGLE_BORDER  # pip install prettytable
+from prettytable import PrettyTable, TableStyle  # pip install prettytable
 from scipy.signal import hilbert, coherence
 from utils.progress import TQDM
 
 from utils.constants import BASELINE_DURATION, CANONICAL_BANDS
 import matplotlib.pyplot as plt
 import os
-mne.set_log_level("ERROR")
+import gc
 
+# --- Reserve RHS inside an axis so append_axes colorbars never clip ----------
+def shove_axis_left_for_cbar(ax, pct=0.18):
+    """Shrink axis width by `pct` (fraction of figure width), leaving RHS room
+    for an axes_grid1.append_axes('right', ...). Safe to call multiple times."""
+    try:
+        fig = ax.figure
+        box = ax.get_position()  # in figure-relative coords
+        # Convert pct in figure coords to axis width fraction:
+        fig_w = 1.0
+        rhs = min(0.45, float(pct))  # keep plenty of plot width
+        new_x1 = max(box.x0 + 0.1, box.x1 - rhs)
+        new_w = new_x1 - box.x0
+        if new_w > 0.05:
+            ax.set_position([box.x0, box.y0, new_w, box.height])
+    except Exception:
+        pass
+
+
+# --- Ensure a right gutter so RHS colorbars/labels never clip ---
+def ensure_right_gutter(fig, gutter=0.16):
+    """Reserve a right-side margin fraction (e.g., 0.16 = 16%).
+    Disables any layout engine first so subplots_adjust takes effect."""
+    try:
+        get_le = getattr(fig, 'get_layout_engine', None)
+        if callable(get_le) and fig.get_layout_engine() is not None:
+            fig.set_layout_engine(None)
+        else:
+            get_cl = getattr(fig, 'get_constrained_layout', None)
+            if callable(get_cl) and fig.get_constrained_layout():
+                fig.set_constrained_layout(False)
+    except Exception:
+        pass
+    try:
+        right = max(0.50, 1.0 - float(gutter))  # keep at least half width
+        fig.subplots_adjust(right=right)
+    except Exception:
+        pass
+    return fig
+
+
+# --- Figure title band helper (reserves real space) ------------------------
+
+def add_title_band(*args, **kwargs):
+    """No-op: global titles disabled."""
+    return None
+
+    # Disable any active layout engine so subplots_adjust is allowed
+    try:
+        get_le = getattr(fig, "get_layout_engine", None)
+        if callable(get_le):
+            if fig.get_layout_engine() is not None:
+                fig.set_layout_engine(None)
+        else:
+            get_cl = getattr(fig, "get_constrained_layout", None)
+            if callable(get_cl) and fig.get_constrained_layout():
+                fig.set_constrained_layout(False)
+    except Exception:
+        pass
+
+    # Reserve vertical space for the title band (only on first call)
+    sp = fig.subplotpars
+    base_top = getattr(fig, "_titleband_base_top", sp.top)  # cache original
+    fig._titleband_base_top = base_top
+    new_top = max(base_top - height, 0.12)
+    fig.subplots_adjust(top=new_top)
+
+    # Draw the title in a transparent axes occupying the reserved band
+    ax_title = fig.add_axes([sp.left, new_top, sp.right - sp.left, height], frameon=False)
+    ax_title.set_xticks([]); ax_title.set_yticks([]); ax_title.patch.set_alpha(0)
+    ax_title.text(0.5, 0.5, str(title), ha="center", va="center",
+                  fontsize=fontsize, fontweight=fontweight)
+
+    # Keep a handle so future calls just update this one
+    fig._titleband_axes = ax_title
+    return ax_title
+
+mne.set_log_level("ERROR")
 
 def configure(config_path: str, title: str = "Configuration Settings"):
     with open(config_path) as f:
@@ -38,7 +115,7 @@ def configure(config_path: str, title: str = "Configuration Settings"):
 
     # Build table
     table = PrettyTable()
-    table.set_style(SINGLE_BORDER)        # optional: nice single-line borders
+    table.set_style(TableStyle.SINGLE_BORDER)       # optional: nice single-line borders
     table.title = title                    # <-- boxed, spanning title
     table.field_names = ["Setting", "Value"]
     table.align["Setting"] = "r"
@@ -56,8 +133,6 @@ def configure(config_path: str, title: str = "Configuration Settings"):
 
     print(table)
     return pre_sham_path, post_sham_path, pre_active_path, post_active_path, montage, window, overlap, channels
-
-
 
 def load_pre_post_stim(edf_file: str, channels, montage: str):
     # Load the EDF files into MNE Raw objects
@@ -158,7 +233,6 @@ def plot_scalogram(power, freqs, times, ch_idx, ch_name=None, vmin=None, vmax=No
     plt.tight_layout()
     plt.show()
 
-
 def _extract_tfr(raw_csd):
     out = cmor_tfr(raw_csd)
     if isinstance(out, tuple) and len(out) == 3:
@@ -167,7 +241,6 @@ def _extract_tfr(raw_csd):
         P, freqs = out
         times = raw_csd.times
     return np.asarray(P), np.asarray(freqs), np.asarray(times)
-
 
 def trim_to_common_length(P_pre, t_pre, P_post, t_post, sfreq, expected_minutes=20,
                           prefer_expected=True, warn_label=""):
@@ -188,7 +261,6 @@ def trim_to_common_length(P_pre, t_pre, P_post, t_post, sfreq, expected_minutes=
     t_t = t_ref[:n_target]
     return P_pre_t, P_post_t, t_t
 
-
 def compute_shared_clim(A, B, p_lo=5, p_hi=95):
     combined = np.concatenate([np.asarray(A).ravel(), np.asarray(B).ravel()])
     vmin, vmax = np.nanpercentile(combined, [p_lo, p_hi])
@@ -197,7 +269,6 @@ def compute_shared_clim(A, B, p_lo=5, p_hi=95):
         vmin, vmax = vmin - pad, vmax + pad
     return float(vmin), float(vmax)
 
-
 def relative_power_per_channel(Ppre_s, Ppre_a, eps=1e-20):
     denom_s = Ppre_s.sum(axis=1, keepdims=True) + eps
     denom_a = Ppre_a.sum(axis=1, keepdims=True) + eps
@@ -205,14 +276,12 @@ def relative_power_per_channel(Ppre_s, Ppre_a, eps=1e-20):
     RP_active_pct = (Ppre_a / denom_a) * 100.0
     return RP_sham_pct, RP_active_pct
 
-
 def shared_clim_relative_percent(*arrays, lo=1, hi=99):
     flat = np.concatenate([np.asarray(A).ravel() for A in arrays])
     vmin, vmax = np.nanpercentile(flat, [lo, hi])
     vmin = max(0.0, float(vmin))
     vmax = min(100.0, float(vmax if vmax > vmin else vmin + 1.0))
     return vmin, vmax
-
 
 def _block_slices(times, block_sec, keep_tail_frac=0.5):
     if times.size < 2:
@@ -228,7 +297,6 @@ def _block_slices(times, block_sec, keep_tail_frac=0.5):
     if start < N and (N - start) >= keep_tail_frac * L:
         yield slice(start, N)
 
-
 def band_block_means(P, freqs, times, bands_dict, block_sec):
     masks = {bn: (freqs >= lo) & (freqs <= hi) for bn, (lo, hi) in bands_dict.items()}
     slices = list(_block_slices(times, block_sec))
@@ -237,7 +305,6 @@ def band_block_means(P, freqs, times, bands_dict, block_sec):
         for bn, m in masks.items():
             out[bn][:, b] = P[:, m, :][:, :, slc].mean(axis=(1, 2))
     return out, slices
-
 
 def effect_with_ci_from_block_ratios(r_sham, r_active, n_boot=2000, ci=95, seed=0):
     eps = 1e-20
@@ -256,12 +323,10 @@ def effect_with_ci_from_block_ratios(r_sham, r_active, n_boot=2000, ci=95, seed=
     lo, hi = np.percentile(boots, [alpha, 100 - alpha])
     return float(effect_pct), float(lo), float(hi)
 
-
 def analytic_unit_phasor(data, sfreq, lo, hi):
     bp = mne.filter.filter_data(data, sfreq=sfreq, l_freq=lo, h_freq=hi, verbose=False)
     analytic = hilbert(bp, axis=-1)
     return np.exp(1j * np.angle(analytic))
-
 
 def plv_blocks_from_z(z, times, block_sec):
     slices = list(_block_slices(times, block_sec))
@@ -269,7 +334,6 @@ def plv_blocks_from_z(z, times, block_sec):
     for b, slc in enumerate(slices):
         out[:, b] = np.abs(np.mean(z[:, slc], axis=-1))
     return out, slices
-
 
 def plv_band_block_values(raw_csd, bands_dict, times, block_sec, show_progress=False, desc="PLV"):
     X = raw_csd.get_data()
@@ -285,7 +349,6 @@ def plv_band_block_values(raw_csd, bands_dict, times, block_sec, show_progress=F
     slices = list(_block_slices(times, block_sec))
     return plv_blocks, slices
 
-
 def effect_with_ci_from_plv_deltas(d_sham, d_active, n_boot=2000, ci=95, seed=0):
     effect_pp = float(np.median(d_active) - np.median(d_sham))
     rng = np.random.default_rng(seed)
@@ -298,7 +361,6 @@ def effect_with_ci_from_plv_deltas(d_sham, d_active, n_boot=2000, ci=95, seed=0)
     lo, hi = np.percentile(boots, [alpha, 100 - alpha])
     return effect_pp, float(lo), float(hi)
 
-
 def plv_maps_from_blocks(plv_blocks_dict):
     band_names = list(plv_blocks_dict.keys())
     n_ch = next(iter(plv_blocks_dict.values())).shape[0]
@@ -308,14 +370,12 @@ def plv_maps_from_blocks(plv_blocks_dict):
         plv_map[:, bi, :] = plv_blocks_dict[bn]
     return plv_map, band_names
 
-
 def shared_clim_plv(*arrays, lo=1, hi=99):
     flat = np.concatenate([np.asarray(A).ravel() for A in arrays])
     vmin, vmax = np.nanpercentile(flat, [lo, hi])
     vmin = max(0.0, float(vmin))
     vmax = min(1.0, float(vmax if vmax > vmin else vmin + 0.05))
     return vmin, vmax
-
 
 def spectral_entropy_blocks(P, freqs, times, bands_dict, block_sec, eps=1e-20,
                             show_progress=False, desc="SE"):
@@ -335,7 +395,6 @@ def spectral_entropy_blocks(P, freqs, times, bands_dict, block_sec, eps=1e-20,
             out[bn][:, b] = Hn
     return out, slices
 
-
 def se_maps_from_blocks(se_blocks_dict):
     band_names = list(se_blocks_dict.keys())
     n_ch = next(iter(se_blocks_dict.values())).shape[0]
@@ -345,14 +404,12 @@ def se_maps_from_blocks(se_blocks_dict):
         M[:, bi, :] = se_blocks_dict[bn]
     return M, band_names
 
-
 def shared_clim_unit_interval(*arrays, lo=1, hi=99):
     flat = np.concatenate([np.asarray(A).ravel() for A in arrays])
     vmin, vmax = np.nanpercentile(flat, [lo, hi])
     vmin = max(0.0, float(vmin))
     vmax = min(1.0, float(vmax if vmax > vmin else vmin + 0.01))
     return vmin, vmax
-
 
 def _coh_block_matrix(X, sfreq, band, nperseg=None, noverlap=None):
     n_ch, L = X.shape
@@ -370,7 +427,6 @@ def _coh_block_matrix(X, sfreq, band, nperseg=None, noverlap=None):
             v = float(np.nanmean(coh[m])) if np.any(m) else 0.0
             C[i, j] = C[j, i] = v
     return np.clip(C, 0.0, 1.0)
-
 
 def msc_blocks(raw_csd, times, bands_dict, block_sec,
                show_progress=False, desc="MSC", return_block_mats=False):
@@ -405,7 +461,6 @@ def msc_blocks(raw_csd, times, bands_dict, block_sec,
         return mean_blocks, mats_avg, mids, slices, mats_blocks
     return mean_blocks, mats_avg, mids, slices
 
-
 def msc_maps_from_blocks(msc_blocks_dict):
     band_names = list(msc_blocks_dict.keys())
     n_ch = next(iter(msc_blocks_dict.values())).shape[0]
@@ -414,7 +469,6 @@ def msc_maps_from_blocks(msc_blocks_dict):
     for bi, bn in enumerate(band_names):
         M[:, bi, :] = msc_blocks_dict[bn]
     return M, band_names
-
 
 def _get_channel_xy(info, ch_names, prefer_montage="standard_1005"):
     """
@@ -521,7 +575,6 @@ def _get_channel_xy(info, ch_names, prefer_montage="standard_1005"):
     P *= 0.48
     return P
 
-
 def percent_change_map(pre_dict, post_dict, eps=1e-9):
     bnames = list(pre_dict.keys())
     n_ch = pre_dict[bnames[0]].shape[0]
@@ -533,7 +586,6 @@ def percent_change_map(pre_dict, post_dict, eps=1e-9):
         post = post_dict[bn][:, :n_blk]
         out[:, bi, :] = 100.0 * ((post + eps) / (pre + eps) - 1.0)
     return out
-
 
 def mats_effect_ratio_of_ratios(pre_s_mats, post_s_mats, pre_a_mats, post_a_mats, eps=1e-9):
     """
@@ -547,7 +599,6 @@ def mats_effect_ratio_of_ratios(pre_s_mats, post_s_mats, pre_a_mats, post_a_mats
              ((post_s_mats[bn] + eps) / (pre_s_mats[bn] + eps))
         out.append(100.0 * (rr - 1.0))
     return out, bands
-
 
 def symmetric_limits_from_mats(mats_list, p_lo=5, p_hi=95):
     vals = []
@@ -566,11 +617,9 @@ def symmetric_limits_from_mats(mats_list, p_lo=5, p_hi=95):
         m = 1.0
     return -float(m), float(m)
 
-
 def _align_blocks(*arrays):
     n = min(a.shape[0] for a in arrays)
     return [a[:n] for a in arrays]
-
 
 def edge_effect_ci_from_blocks(pre_s, post_s, pre_a, post_a,
                                ci=95, n_boot=2000, seed=0, eps=1e-9,
@@ -625,7 +674,6 @@ def edge_effect_ci_from_blocks(pre_s, post_s, pre_a, post_a,
     lo = np.percentile(boots, alpha, axis=0)
     hi = np.percentile(boots, 100 - alpha, axis=0)
     return eff, lo, hi
-
 
 class SinglePanelViewer(QtWidgets.QMainWindow):
     """
@@ -717,6 +765,8 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
     def _render_power(self, ch_idx):
         tfs, lfs = self._fonts["tfs"], self._fonts["lfs"]
         fig = Figure(figsize=self._sizes["fig"], constrained_layout=True)
+        ensure_right_gutter(fig, gutter=0.16)
+
         fig.set_constrained_layout_pads(w_pad=0.05, h_pad=0.05, wspace=0.10, hspace=0.12)
         gs = fig.add_gridspec(3, 2, height_ratios=[0.9, 0.9, 2.0])
         ax00 = fig.add_subplot(gs[0,0]); ax01 = fig.add_subplot(gs[0,1])
@@ -765,12 +815,13 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
                           "Power effect [%] (ACTIVE vs SHAM)",
                           "Band-wise Power Effect (median post/pre ratio ± 95% CI)",
                           lfs, tfs)
-        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.98)
         return self._canvas_with_toolbar(fig)
 
     def _render_plv(self, ch_idx):
         tfs, lfs = self._fonts["tfs"], self._fonts["lfs"]
         fig = Figure(figsize=self._sizes["fig"], constrained_layout=True)
+        ensure_right_gutter(fig, gutter=0.16)
+
         fig.set_constrained_layout_pads(w_pad=0.05, h_pad=0.05, wspace=0.10, hspace=0.12)
         gs = fig.add_gridspec(3, 2, height_ratios=[0.9, 0.9, 2.0])
         ax30 = fig.add_subplot(gs[0,0]); ax31 = fig.add_subplot(gs[0,1])
@@ -823,7 +874,6 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
                           "PLV effect [pp] (ACTIVE vs SHAM)",
                           "Band-wise PLV Effect (median ΔPLV ± 95% CI)",
                           lfs, tfs)
-        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.98)
         return self._canvas_with_toolbar(fig)
 
     def _render_se(self, ch_idx):
@@ -882,7 +932,6 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
                           "SE effect [%] (ACTIVE vs SHAM)",
                           "Band-wise Spectral Entropy Effect (median post/pre ratio ± 95% CI)",
                           lfs, tfs)
-        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.98)
         return self._canvas_with_toolbar(fig)
 
     def _render_msc(self, ch_idx):
@@ -940,7 +989,6 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
                           "MSC effect [%] (ACTIVE vs SHAM)",
                           "Band-wise MSC Effect (median post/pre ratio ± 95% CI)",
                           lfs, tfs)
-        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.98)
         return self._canvas_with_toolbar(fig)
 
     def _render_ego(self, ch_idx):
@@ -1010,7 +1058,6 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
         cb = fig.colorbar(sm, ax=fig.axes, fraction=0.035, pad=0.02)
         cb.set_label("EFFECT ΔMSC [%]", rotation=90, labelpad=7, fontsize=9)
 
-        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.995)
         return self._canvas_with_toolbar(fig)
 
     def _render_ego_bars(self, ch_idx):
@@ -1100,29 +1147,44 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
         cb = fig.colorbar(sm, ax=fig.axes, fraction=0.035, pad=0.02)
         cb.set_label("EFFECT ΔMSC [%]", rotation=90, labelpad=7, fontsize=9)
 
-        fig.suptitle(f"{self._ch_names[ch_idx]} — Ego edges (bars with 95% CI)", fontsize=12, fontweight="bold", y=0.995)
+        # fig.suptitle(f"{self._ch_names[ch_idx]} — Ego edges (bars with 95% CI)", fontsize=12, fontweight="bold", y=0.995)
         return self._canvas_with_toolbar(fig)
 
     def render_panel(self):
-        while self._plot_layout.count():
-            w = self._plot_layout.takeAt(0).widget()
-            if w is not None:
-                w.deleteLater()
+        if getattr(self, '_rendering', False):
+            return
+        self._rendering = True
+        try:
+            # Clear previous plot
+            if hasattr(self, '_clear_plot_layout'):
+                self._clear_plot_layout()
 
-        ch_idx = self.cb_chan.currentIndex()
-        feat = self.cb_feat.currentText()
+            while self._plot_layout.count():
+                w = self._plot_layout.takeAt(0).widget()
+                if w is not None:
+                    w.deleteLater()
 
-        if feat == "Power":
-            widget = self._render_power(ch_idx)
-        elif feat == "PLV":
-            widget = self._render_plv(ch_idx)
-        elif feat == "Entropy":
-            widget = self._render_se(ch_idx)
-        elif feat == "Coherence":
-            widget = self._render_msc(ch_idx)
-        elif feat == "Ego bars":
-            widget = self._render_ego_bars(ch_idx)
-        else:
-            widget = self._render_ego(ch_idx)
+            ch_idx = self.cb_chan.currentIndex()
+            feat = self.cb_feat.currentText()
 
-        self._plot_layout.addWidget(widget)
+            if feat == "Power":
+                widget = self._render_power(ch_idx)
+            elif feat == "PLV":
+                widget = self._render_plv(ch_idx)
+            elif feat == "Entropy":
+                widget = self._render_se(ch_idx)
+            elif feat == "Coherence":
+                widget = self._render_msc(ch_idx)
+            elif feat == "Ego bars":
+                widget = self._render_ego_bars(ch_idx)
+            else:
+                widget = self._render_ego(ch_idx)
+
+            self._plot_layout.addWidget(widget)
+
+        except Exception as e:
+            print("Failure:", e)
+
+        finally:
+            self._rendering = False
+
