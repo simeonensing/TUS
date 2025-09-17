@@ -6,32 +6,6 @@
 # ==========================================
 import os
 
-from utils.helper import (
-    _extract_tfr,
-    trim_to_common_length,
-    compute_shared_clim,
-    relative_power_per_channel,
-    shared_clim_relative_percent,
-    _block_slices,
-    band_block_means,
-    effect_with_ci_from_block_ratios,
-    plv_band_block_values,
-    effect_with_ci_from_plv_deltas,
-    plv_maps_from_blocks,
-    shared_clim_plv,
-    spectral_entropy_blocks,
-    se_maps_from_blocks,
-    shared_clim_unit_interval,
-    msc_blocks,
-    msc_maps_from_blocks,
-    _get_channel_xy,
-    percent_change_map,
-    mats_effect_ratio_of_ratios,
-    symmetric_limits_from_mats,
-    SinglePanelViewer,
-)
-
-
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 os.environ["XDG_SESSION_TYPE"] = "x11"
 os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
@@ -63,7 +37,12 @@ except Exception:  # minimal fallback
 TQDM = partial(tqdm, dynamic_ncols=True, leave=False, file=sys.stdout, colour="white")
 
 # Your utilities
-from utils.helpers import load_pre_post_stim, configure
+from utils.helpers import load_pre_post_stim, configure, _extract_tfr, trim_to_common_length, compute_shared_clim, \
+    relative_power_per_channel, shared_clim_relative_percent, _block_slices, band_block_means, \
+    effect_with_ci_from_block_ratios, plv_band_block_values, effect_with_ci_from_plv_deltas, plv_maps_from_blocks, \
+    shared_clim_plv, spectral_entropy_blocks, se_maps_from_blocks, shared_clim_unit_interval, msc_blocks, \
+    msc_maps_from_blocks, _get_channel_xy, percent_change_map, mats_effect_ratio_of_ratios, symmetric_limits_from_mats, \
+    SinglePanelViewer
 from utils.constants import CANONICAL_BANDS  # {"delta":(1,3),...}
 
 
