@@ -6,7 +6,7 @@
 # ==========================================
 import os
 
-from helper import (
+from utils.helper import (
     _extract_tfr,
     trim_to_common_length,
     compute_shared_clim,
