@@ -2,6 +2,7 @@ import matplotlib
 import mne
 from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton, QSizePolicy
+from PyQt5.QtCore import QTimer
 from matplotlib import pyplot as plt, patheffects as pe
 from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -668,8 +669,8 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
         self.cb_feat.addItems(["Power", "PLV", "Entropy", "Coherence", "Ego net", "Ego bars"])
         ctl.addWidget(self.cb_feat)
         ctl.addStretch(1)
-        btn = QPushButton("Render"); btn.clicked.connect(self.render_panel)
-        ctl.addWidget(btn)
+        self.cb_chan.currentIndexChanged.connect(self.render_panel)
+        self.cb_feat.currentIndexChanged.connect(self.render_panel)
         outer.addLayout(ctl)
 
         # Plot holder
@@ -677,10 +678,14 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
         self._plot_layout.setContentsMargins(0,0,0,0); self._plot_layout.setSpacing(0)
         outer.addWidget(self._plot_holder)
 
-        # initial render
+        # initial render (auto)
+        self.cb_chan.blockSignals(True)
+        self.cb_feat.blockSignals(True)
         self.cb_chan.setCurrentIndex(0)
         self.cb_feat.setCurrentIndex(0)
-        self.render_panel()
+        self.cb_chan.blockSignals(False)
+        self.cb_feat.blockSignals(False)
+        QTimer.singleShot(0, self.render_panel)
         self.resize(1360, 980)
 
     def _canvas_with_toolbar(self, fig):
