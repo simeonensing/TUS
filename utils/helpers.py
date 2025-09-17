@@ -13,8 +13,8 @@ import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from prettytable import PrettyTable, SINGLE_BORDER  # pip install prettytable
 from scipy.signal import hilbert, coherence
+from utils.progress import TQDM
 
-from main_old import TQDM
 from utils.constants import BASELINE_DURATION, CANONICAL_BANDS
 import matplotlib.pyplot as plt
 import os
