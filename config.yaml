@@ -3,7 +3,7 @@ post_sham_path: data/TUS/EEG 2_EPOCX_218863_2025.08.28T10.34.10+12.00.edf
 pre_active_path: data/TUS/EEG 3_EPOCX_218863_2025.08.28T10.58.26+12.00.edf
 post_active_path: data/TUS/EEG 4_EPOCX_218863_2025.08.28T11.31.55+12.00.edf
 montage: standard_1005      # Electrode configuration
-window_length: 650.0          # [s]
+window_length: 600.0          # [s]
 overlap: 0.0                # [s]
 channels:                   # EEG channels to pick
   - AF3

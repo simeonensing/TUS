@@ -8,213 +8,19 @@ from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToo
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
-from matplotlib.ticker import MaxNLocator
 from mne.time_frequency import tfr_array_morlet
 import yaml
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from prettytable import PrettyTable, TableStyle  # pip install prettytable
+from prettytable import PrettyTable, SINGLE_BORDER  # pip install prettytable
 from scipy.signal import hilbert, coherence
 from utils.progress import TQDM
 
 from utils.constants import BASELINE_DURATION, CANONICAL_BANDS
 import matplotlib.pyplot as plt
 import os
-import gc
-from mpl_toolkits.axes_grid1.inset_locator import inset_axes
-
-
-# --- Colorbar safety shim -----------------------------------------------------
-# If a RHS colorbar is too close to the figure edge, its tick labels can clip.
-# This wrapper flips ticks/label to the LEFT *only* when the bar's right edge
-# sits near the canvas edge (>= 98% of fig width). Otherwise it leaves it alone.
-def install_cbar_safety(threshold=0.98):
-    import matplotlib.figure
-    _orig_colorbar = matplotlib.figure.Figure.colorbar
-
-    def _safe_colorbar(fig, mappable, *args, **kwargs):
-        cb = _orig_colorbar(fig, mappable, *args, **kwargs)
-        try:
-            # ensure positions are realized
-            try: fig.canvas.draw()
-            except Exception: pass
-            bbox = cb.ax.get_position()  # fig coords
-            # If the colorbar hugs the right border, keep everything inside.
-            if float(bbox.x1) >= float(threshold):
-                cb.ax.yaxis.set_label_position('left')
-                cb.ax.yaxis.tick_left()
-        except Exception:
-            # Never fail drawing just because we tried to help.
-            pass
-        return cb
-
-    matplotlib.figure.Figure.colorbar = _safe_colorbar
-
-# Install once on import
-try:
-    install_cbar_safety()
-except Exception:
-    pass
-
-
-
-# --- Force a colorbar to sit fully inside the figure -------------------------
-def force_cbar_inside(fig, ax, cbar, width=0.045, pad=0.02, right_limit=0.995):
-    """Place colorbar `cbar` next to `ax` but guaranteed inside the figure.
-    width/pad in *figure fractions*. Also moves ticks/label to the right."""
-    try:
-        # Draw once so positions are valid
-        try:
-            fig.canvas.draw()  # not draw_idle: we need a bbox now
-        except Exception:
-            pass
-        box = ax.get_position()  # figure-relative bbox [x0,y0,w,h]
-        w = float(width)
-        p = float(pad)
-        x = min(float(right_limit) - w, box.x1 + p)
-        # Keep some minimum width for the plot if needed
-        x = max(x, box.x0 + 0.02)
-        cbar.ax.set_position([x, box.y0, w, box.height])
-        cbar.ax.yaxis.set_label_position('right')
-        cbar.ax.yaxis.tick_right()
-    except Exception:
-        pass
-
-
-# --- Reserve RHS inside an axis so append_axes colorbars never clip ----------
-def shove_axis_left_for_cbar(ax, pct=0.18):
-    """Shrink axis width by `pct` (fraction of figure width), leaving RHS room
-    for an axes_grid1.append_axes('right', ...). Safe to call multiple times."""
-    try:
-        fig = ax.figure
-        box = ax.get_position()  # in figure-relative coords
-        # Convert pct in figure coords to axis width fraction:
-        fig_w = 1.0
-        rhs = min(0.45, float(pct))  # keep plenty of plot width
-        new_x1 = max(box.x0 + 0.1, box.x1 - rhs)
-        new_w = new_x1 - box.x0
-        if new_w > 0.05:
-            ax.set_position([box.x0, box.y0, new_w, box.height])
-    except Exception:
-        pass
-
-
-# --- Ensure a right gutter so RHS colorbars/labels never clip ---
-def ensure_right_gutter(fig, gutter=0.16):
-    """Reserve a right-side margin fraction (e.g., 0.16 = 16%).
-    Disables any layout engine first so subplots_adjust takes effect."""
-    try:
-        get_le = getattr(fig, 'get_layout_engine', None)
-        if callable(get_le) and fig.get_layout_engine() is not None:
-            fig.set_layout_engine(None)
-        else:
-            get_cl = getattr(fig, 'get_constrained_layout', None)
-            if callable(get_cl) and fig.get_constrained_layout():
-                fig.set_constrained_layout(False)
-    except Exception:
-        pass
-    try:
-        right = max(0.50, 1.0 - float(gutter))  # keep at least half width
-        fig.subplots_adjust(right=right)
-    except Exception:
-        pass
-    return fig
-
-
-# --- Figure title band helper (reserves real space) ------------------------
-
-def add_title_band(
-    fig,
-    title,
-    *,
-    height: float = 0.06,
-    fontsize: float | None = None,
-    fontweight: str | int | None = None,
-    **text_kwargs,
-):
-    """
-    Add or update a full-width 'title band' above subplots without fighting layout engines.
-
-    - Reserves vertical space by lowering subplotpars.top once (cached in fig._titleband_base_top).
-    - Draws a transparent Axes occupying the reserved band (cached in fig._titleband_axes).
-    - If `title` is falsy (None/""), removes the band and restores the original top.
-    - Returns the Axes used for the title band, or None if removed.
-    """
-
-    if fig is None:
-        raise ValueError("add_title_band: 'fig' (matplotlib.figure.Figure) is required.")
-
-    # If we're removing the band, restore and bail.
-    if not title:
-        ax_old = getattr(fig, "_titleband_axes", None)
-        if ax_old is not None:
-            try:
-                ax_old.remove()
-            except Exception:
-                pass
-            setattr(fig, "_titleband_axes", None)
-        base_top = getattr(fig, "_titleband_base_top", None)
-        if base_top is not None:
-            try:
-                fig.subplots_adjust(top=base_top)
-            except Exception:
-                pass
-            delattr(fig, "_titleband_base_top")
-        return None
-
-    # 1) Disable any active layout engine so subplots_adjust is honored
-    try:
-        get_le = getattr(fig, "get_layout_engine", None)
-        if callable(get_le):
-            if fig.get_layout_engine() is not None:
-                fig.set_layout_engine(None)
-        else:
-            # Fallback for older Matplotlib: turn off constrained_layout if set
-            get_cl = getattr(fig, "get_constrained_layout", None)
-            if callable(get_cl) and fig.get_constrained_layout():
-                fig.set_constrained_layout(False)
-    except Exception:
-        # Best-effort; if this fails, we still try to proceed.
-        pass
-
-    # 2) Reserve vertical space once
-    sp = fig.subplotpars
-    if not hasattr(fig, "_titleband_base_top"):
-        fig._titleband_base_top = sp.top  # cache original top the first time
-    base_top = fig._titleband_base_top
-    new_top = max(base_top - float(height), 0.12)  # keep some room for axes
-    try:
-        fig.subplots_adjust(top=new_top)
-    except Exception:
-        # If adjustments fail, continue (band may overlap slightly)
-        pass
-
-    # 3) Create or update the band axes
-    ax_title = getattr(fig, "_titleband_axes", None)
-    if ax_title is None or not hasattr(ax_title, "text"):
-        # Fresh axes spanning the reserved band
-        ax_title = fig.add_axes([sp.left, new_top, sp.right - sp.left, float(height)], frameon=False)
-        ax_title.set_xticks([]), ax_title.set_yticks([])
-        ax_title.patch.set_alpha(0)
-        fig._titleband_axes = ax_title
-    else:
-        # Update position in case height/base changed
-        ax_title.set_position([sp.left, new_top, sp.right - sp.left, float(height)])
-        ax_title.clear()
-        ax_title.set_xticks([]), ax_title.set_yticks([])
-        ax_title.patch.set_alpha(0)
-
-    # 4) Draw the centered title text
-    if fontsize is not None:
-        text_kwargs.setdefault("fontsize", fontsize)
-    if fontweight is not None:
-        text_kwargs.setdefault("fontweight", fontweight)
-
-    ax_title.text(0.5, 0.5, str(title), ha="center", va="center", **text_kwargs)
-    return ax_title
-
-
 mne.set_log_level("ERROR")
+
 
 def configure(config_path: str, title: str = "Configuration Settings"):
     with open(config_path) as f:
@@ -232,7 +38,7 @@ def configure(config_path: str, title: str = "Configuration Settings"):
 
     # Build table
     table = PrettyTable()
-    table.set_style(TableStyle.SINGLE_BORDER)       # optional: nice single-line borders
+    table.set_style(SINGLE_BORDER)        # optional: nice single-line borders
     table.title = title                    # <-- boxed, spanning title
     table.field_names = ["Setting", "Value"]
     table.align["Setting"] = "r"
@@ -250,6 +56,8 @@ def configure(config_path: str, title: str = "Configuration Settings"):
 
     print(table)
     return pre_sham_path, post_sham_path, pre_active_path, post_active_path, montage, window, overlap, channels
+
+
 
 def load_pre_post_stim(edf_file: str, channels, montage: str):
     # Load the EDF files into MNE Raw objects
@@ -350,6 +158,7 @@ def plot_scalogram(power, freqs, times, ch_idx, ch_name=None, vmin=None, vmax=No
     plt.tight_layout()
     plt.show()
 
+
 def _extract_tfr(raw_csd):
     out = cmor_tfr(raw_csd)
     if isinstance(out, tuple) and len(out) == 3:
@@ -358,6 +167,7 @@ def _extract_tfr(raw_csd):
         P, freqs = out
         times = raw_csd.times
     return np.asarray(P), np.asarray(freqs), np.asarray(times)
+
 
 def trim_to_common_length(P_pre, t_pre, P_post, t_post, sfreq, expected_minutes=20,
                           prefer_expected=True, warn_label=""):
@@ -378,6 +188,7 @@ def trim_to_common_length(P_pre, t_pre, P_post, t_post, sfreq, expected_minutes=
     t_t = t_ref[:n_target]
     return P_pre_t, P_post_t, t_t
 
+
 def compute_shared_clim(A, B, p_lo=5, p_hi=95):
     combined = np.concatenate([np.asarray(A).ravel(), np.asarray(B).ravel()])
     vmin, vmax = np.nanpercentile(combined, [p_lo, p_hi])
@@ -386,6 +197,7 @@ def compute_shared_clim(A, B, p_lo=5, p_hi=95):
         vmin, vmax = vmin - pad, vmax + pad
     return float(vmin), float(vmax)
 
+
 def relative_power_per_channel(Ppre_s, Ppre_a, eps=1e-20):
     denom_s = Ppre_s.sum(axis=1, keepdims=True) + eps
     denom_a = Ppre_a.sum(axis=1, keepdims=True) + eps
@@ -393,12 +205,14 @@ def relative_power_per_channel(Ppre_s, Ppre_a, eps=1e-20):
     RP_active_pct = (Ppre_a / denom_a) * 100.0
     return RP_sham_pct, RP_active_pct
 
+
 def shared_clim_relative_percent(*arrays, lo=1, hi=99):
     flat = np.concatenate([np.asarray(A).ravel() for A in arrays])
     vmin, vmax = np.nanpercentile(flat, [lo, hi])
     vmin = max(0.0, float(vmin))
     vmax = min(100.0, float(vmax if vmax > vmin else vmin + 1.0))
     return vmin, vmax
+
 
 def _block_slices(times, block_sec, keep_tail_frac=0.5):
     if times.size < 2:
@@ -414,6 +228,7 @@ def _block_slices(times, block_sec, keep_tail_frac=0.5):
     if start < N and (N - start) >= keep_tail_frac * L:
         yield slice(start, N)
 
+
 def band_block_means(P, freqs, times, bands_dict, block_sec):
     masks = {bn: (freqs >= lo) & (freqs <= hi) for bn, (lo, hi) in bands_dict.items()}
     slices = list(_block_slices(times, block_sec))
@@ -422,6 +237,7 @@ def band_block_means(P, freqs, times, bands_dict, block_sec):
         for bn, m in masks.items():
             out[bn][:, b] = P[:, m, :][:, :, slc].mean(axis=(1, 2))
     return out, slices
+
 
 def effect_with_ci_from_block_ratios(r_sham, r_active, n_boot=2000, ci=95, seed=0):
     eps = 1e-20
@@ -440,10 +256,12 @@ def effect_with_ci_from_block_ratios(r_sham, r_active, n_boot=2000, ci=95, seed=
     lo, hi = np.percentile(boots, [alpha, 100 - alpha])
     return float(effect_pct), float(lo), float(hi)
 
+
 def analytic_unit_phasor(data, sfreq, lo, hi):
     bp = mne.filter.filter_data(data, sfreq=sfreq, l_freq=lo, h_freq=hi, verbose=False)
     analytic = hilbert(bp, axis=-1)
     return np.exp(1j * np.angle(analytic))
+
 
 def plv_blocks_from_z(z, times, block_sec):
     slices = list(_block_slices(times, block_sec))
@@ -451,6 +269,7 @@ def plv_blocks_from_z(z, times, block_sec):
     for b, slc in enumerate(slices):
         out[:, b] = np.abs(np.mean(z[:, slc], axis=-1))
     return out, slices
+
 
 def plv_band_block_values(raw_csd, bands_dict, times, block_sec, show_progress=False, desc="PLV"):
     X = raw_csd.get_data()
@@ -466,6 +285,7 @@ def plv_band_block_values(raw_csd, bands_dict, times, block_sec, show_progress=F
     slices = list(_block_slices(times, block_sec))
     return plv_blocks, slices
 
+
 def effect_with_ci_from_plv_deltas(d_sham, d_active, n_boot=2000, ci=95, seed=0):
     effect_pp = float(np.median(d_active) - np.median(d_sham))
     rng = np.random.default_rng(seed)
@@ -478,6 +298,7 @@ def effect_with_ci_from_plv_deltas(d_sham, d_active, n_boot=2000, ci=95, seed=0)
     lo, hi = np.percentile(boots, [alpha, 100 - alpha])
     return effect_pp, float(lo), float(hi)
 
+
 def plv_maps_from_blocks(plv_blocks_dict):
     band_names = list(plv_blocks_dict.keys())
     n_ch = next(iter(plv_blocks_dict.values())).shape[0]
@@ -487,12 +308,14 @@ def plv_maps_from_blocks(plv_blocks_dict):
         plv_map[:, bi, :] = plv_blocks_dict[bn]
     return plv_map, band_names
 
+
 def shared_clim_plv(*arrays, lo=1, hi=99):
     flat = np.concatenate([np.asarray(A).ravel() for A in arrays])
     vmin, vmax = np.nanpercentile(flat, [lo, hi])
     vmin = max(0.0, float(vmin))
     vmax = min(1.0, float(vmax if vmax > vmin else vmin + 0.05))
     return vmin, vmax
+
 
 def spectral_entropy_blocks(P, freqs, times, bands_dict, block_sec, eps=1e-20,
                             show_progress=False, desc="SE"):
@@ -512,6 +335,7 @@ def spectral_entropy_blocks(P, freqs, times, bands_dict, block_sec, eps=1e-20,
             out[bn][:, b] = Hn
     return out, slices
 
+
 def se_maps_from_blocks(se_blocks_dict):
     band_names = list(se_blocks_dict.keys())
     n_ch = next(iter(se_blocks_dict.values())).shape[0]
@@ -521,12 +345,14 @@ def se_maps_from_blocks(se_blocks_dict):
         M[:, bi, :] = se_blocks_dict[bn]
     return M, band_names
 
+
 def shared_clim_unit_interval(*arrays, lo=1, hi=99):
     flat = np.concatenate([np.asarray(A).ravel() for A in arrays])
     vmin, vmax = np.nanpercentile(flat, [lo, hi])
     vmin = max(0.0, float(vmin))
     vmax = min(1.0, float(vmax if vmax > vmin else vmin + 0.01))
     return vmin, vmax
+
 
 def _coh_block_matrix(X, sfreq, band, nperseg=None, noverlap=None):
     n_ch, L = X.shape
@@ -544,6 +370,7 @@ def _coh_block_matrix(X, sfreq, band, nperseg=None, noverlap=None):
             v = float(np.nanmean(coh[m])) if np.any(m) else 0.0
             C[i, j] = C[j, i] = v
     return np.clip(C, 0.0, 1.0)
+
 
 def msc_blocks(raw_csd, times, bands_dict, block_sec,
                show_progress=False, desc="MSC", return_block_mats=False):
@@ -578,6 +405,7 @@ def msc_blocks(raw_csd, times, bands_dict, block_sec,
         return mean_blocks, mats_avg, mids, slices, mats_blocks
     return mean_blocks, mats_avg, mids, slices
 
+
 def msc_maps_from_blocks(msc_blocks_dict):
     band_names = list(msc_blocks_dict.keys())
     n_ch = next(iter(msc_blocks_dict.values())).shape[0]
@@ -586,6 +414,7 @@ def msc_maps_from_blocks(msc_blocks_dict):
     for bi, bn in enumerate(band_names):
         M[:, bi, :] = msc_blocks_dict[bn]
     return M, band_names
+
 
 def _get_channel_xy(info, ch_names, prefer_montage="standard_1005"):
     """
@@ -692,6 +521,7 @@ def _get_channel_xy(info, ch_names, prefer_montage="standard_1005"):
     P *= 0.48
     return P
 
+
 def percent_change_map(pre_dict, post_dict, eps=1e-9):
     bnames = list(pre_dict.keys())
     n_ch = pre_dict[bnames[0]].shape[0]
@@ -703,6 +533,7 @@ def percent_change_map(pre_dict, post_dict, eps=1e-9):
         post = post_dict[bn][:, :n_blk]
         out[:, bi, :] = 100.0 * ((post + eps) / (pre + eps) - 1.0)
     return out
+
 
 def mats_effect_ratio_of_ratios(pre_s_mats, post_s_mats, pre_a_mats, post_a_mats, eps=1e-9):
     """
@@ -716,6 +547,7 @@ def mats_effect_ratio_of_ratios(pre_s_mats, post_s_mats, pre_a_mats, post_a_mats
              ((post_s_mats[bn] + eps) / (pre_s_mats[bn] + eps))
         out.append(100.0 * (rr - 1.0))
     return out, bands
+
 
 def symmetric_limits_from_mats(mats_list, p_lo=5, p_hi=95):
     vals = []
@@ -734,9 +566,11 @@ def symmetric_limits_from_mats(mats_list, p_lo=5, p_hi=95):
         m = 1.0
     return -float(m), float(m)
 
+
 def _align_blocks(*arrays):
     n = min(a.shape[0] for a in arrays)
     return [a[:n] for a in arrays]
+
 
 def edge_effect_ci_from_blocks(pre_s, post_s, pre_a, post_a,
                                ci=95, n_boot=2000, seed=0, eps=1e-9,
@@ -792,6 +626,7 @@ def edge_effect_ci_from_blocks(pre_s, post_s, pre_a, post_a,
     hi = np.percentile(boots, 100 - alpha, axis=0)
     return eff, lo, hi
 
+
 class SinglePanelViewer(QtWidgets.QMainWindow):
     """
     Show exactly one panel at a time.
@@ -812,7 +647,7 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.setMinimumSize(800, 600)
 
-        self.setWindowTitle("EEG Feature Viewer")
+        self.setWindowTitle("TUS Viewer — Single Panel")
         self._ch_names = ch_names
         self._freqs = freqs
         self._data = data      # dict with 'power','plv','se','msc'
@@ -882,8 +717,6 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
     def _render_power(self, ch_idx):
         tfs, lfs = self._fonts["tfs"], self._fonts["lfs"]
         fig = Figure(figsize=self._sizes["fig"], constrained_layout=True)
-        ensure_right_gutter(fig, gutter=0.16)
-
         fig.set_constrained_layout_pads(w_pad=0.05, h_pad=0.05, wspace=0.10, hspace=0.12)
         gs = fig.add_gridspec(3, 2, height_ratios=[0.9, 0.9, 2.0])
         ax00 = fig.add_subplot(gs[0,0]); ax01 = fig.add_subplot(gs[0,1])
@@ -932,13 +765,12 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
                           "Power effect [%] (ACTIVE vs SHAM)",
                           "Band-wise Power Effect (median post/pre ratio ± 95% CI)",
                           lfs, tfs)
+        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.98)
         return self._canvas_with_toolbar(fig)
 
     def _render_plv(self, ch_idx):
         tfs, lfs = self._fonts["tfs"], self._fonts["lfs"]
         fig = Figure(figsize=self._sizes["fig"], constrained_layout=True)
-        ensure_right_gutter(fig, gutter=0.16)
-
         fig.set_constrained_layout_pads(w_pad=0.05, h_pad=0.05, wspace=0.10, hspace=0.12)
         gs = fig.add_gridspec(3, 2, height_ratios=[0.9, 0.9, 2.0])
         ax30 = fig.add_subplot(gs[0,0]); ax31 = fig.add_subplot(gs[0,1])
@@ -991,262 +823,150 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
                           "PLV effect [pp] (ACTIVE vs SHAM)",
                           "Band-wise PLV Effect (median ΔPLV ± 95% CI)",
                           lfs, tfs)
+        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.98)
         return self._canvas_with_toolbar(fig)
 
     def _render_se(self, ch_idx):
-        # fonts
         tfs, lfs = self._fonts["tfs"], self._fonts["lfs"]
+        fig = Figure(figsize=self._sizes["fig"], constrained_layout=True)
+        fig.set_constrained_layout_pads(w_pad=0.05, h_pad=0.05, wspace=0.10, hspace=0.12)
+        gs = fig.add_gridspec(3, 2, height_ratios=[0.9, 0.9, 2.0])
+        ax60 = fig.add_subplot(gs[0,0]); ax61 = fig.add_subplot(gs[0,1])
+        ax70 = fig.add_subplot(gs[1,0]); ax71 = fig.add_subplot(gs[1,1])
+        ax80 = fig.add_subplot(gs[2,:])
 
-        # --- Figure: no constrained layout; we’ll control margins ourselves
-        fig = Figure(figsize=self._sizes["fig"], constrained_layout=False)
-        # Keep a little right gutter so RHS elements never clip (0.84 = 16% gutter)
-        try:
-            fig.set_layout_engine(None)
-        except Exception:
-            pass
-        fig.subplots_adjust(right=0.84)
-
-        # Grid
-        gs = fig.add_gridspec(3, 2, height_ratios=[0.9, 0.9, 2.0], wspace=0.25, hspace=0.30)
-        ax60 = fig.add_subplot(gs[0, 0]);
-        ax61 = fig.add_subplot(gs[0, 1])
-        ax70 = fig.add_subplot(gs[1, 0]);
-        ax71 = fig.add_subplot(gs[1, 1])
-        ax80 = fig.add_subplot(gs[2, :])
-
-        d = self._data["se"];
-        L = self._limits
-        tb_s = d["tb_s"];
-        tb_a = d["tb_a"]
-        extent_s = [tb_s[0], tb_s[-1], -0.5, len(d["bands"]) - 0.5]
-        extent_a = [tb_a[0], tb_a[-1], -0.5, len(d["bands"]) - 0.5]
+        d = self._data["se"]; L = self._limits
+        tb_s = d["tb_s"]; tb_a = d["tb_a"]
+        extent_s = [tb_s[0], tb_s[-1], -0.5, len(d["bands"])-0.5]
+        extent_a = [tb_a[0], tb_a[-1], -0.5, len(d["bands"])-0.5]
 
         for ax in (ax60, ax61, ax70, ax71):
             ax.set_axisbelow(True)
 
-        # --- PRE sham
-        im0 = ax60.imshow(
-            d["pre_s"][ch_idx], aspect="auto", origin="lower", extent=extent_s,
-            vmin=L["vmin_se"], vmax=L["vmax_se"], cmap="plasma"
-        )
+        im0 = ax60.imshow(d["pre_s"][ch_idx], aspect="auto", origin="lower", extent=extent_s,
+                          vmin=L["vmin_se"], vmax=L["vmax_se"], cmap="plasma")
         ax60.set_title("PRE — SHAM (Spectral Entropy)", fontsize=tfs, pad=6)
         ax60.set_ylabel("Band", fontsize=lfs)
-        ax60.set_yticks(np.arange(len(d["bands"])))
-        ax60.set_yticklabels(d["bands"], fontsize=lfs)
-        ax60.tick_params(labelsize=lfs)
-        ax60.tick_params(labelbottom=False)
+        ax60.set_yticks(np.arange(len(d["bands"]))); ax60.set_yticklabels(d["bands"], fontsize=lfs)
+        ax60.tick_params(labelsize=lfs); ax60.tick_params(labelbottom=False)
         ax60.grid(True, linestyle=':', alpha=0.35)
 
-        # --- PRE active (+ colorbar INSIDE axis using inset_axes)
-        im1 = ax61.imshow(
-            d["pre_a"][ch_idx], aspect="auto", origin="lower", extent=extent_a,
-            vmin=L["vmin_se"], vmax=L["vmax_se"], cmap="plasma"
-        )
+        im1 = ax61.imshow(d["pre_a"][ch_idx], aspect="auto", origin="lower", extent=extent_a,
+                          vmin=L["vmin_se"], vmax=L["vmax_se"], cmap="plasma")
         ax61.set_title("PRE — ACTIVE (Spectral Entropy)", fontsize=tfs, pad=6)
-        ax61.set_yticks([])
-        ax61.tick_params(labelsize=lfs)
-        ax61.tick_params(labelbottom=False)
+        ax61.set_yticks([]); ax61.tick_params(labelsize=lfs); ax61.tick_params(labelbottom=False)
         ax61.grid(True, linestyle=':', alpha=0.35)
+        cax1 = make_axes_locatable(ax61).append_axes("right", size="2.8%", pad=0.02)
+        cb1 = fig.colorbar(im1, cax=cax1); cb1.set_label("SE (0..1)", rotation=90, labelpad=8, fontsize=lfs)
 
-        cax1 = inset_axes(
-            ax61, width="3.5%", height="100%", loc="lower left",
-            bbox_to_anchor=(1.02, 0., 1, 1), bbox_transform=ax61.transAxes, borderpad=0
-        )
-        cb1 = fig.colorbar(im1, cax=cax1)
-        cb1.set_label("SE (0..1)", rotation=90, labelpad=8, fontsize=lfs)
-        cb1.ax.yaxis.set_label_position("right")
-        cb1.ax.yaxis.tick_right()
-        cb1.ax.tick_params(labelsize=lfs)
+        tb2_s = d["tb2_s"]; tb2_a = d["tb2_a"]
+        extent_ds = [tb2_s[0], tb2_s[-1], -0.5, len(d["bands"])-0.5]
+        extent_da = [tb2_a[0], tb2_a[-1], -0.5, len(d["bands"])-0.5]
 
-        # --- Δ maps
-        tb2_s = d["tb2_s"];
-        tb2_a = d["tb2_a"]
-        extent_ds = [tb2_s[0], tb2_s[-1], -0.5, len(d["bands"]) - 0.5]
-        extent_da = [tb2_a[0], tb2_a[-1], -0.5, len(d["bands"]) - 0.5]
-
-        im2 = ax70.imshow(
-            d["d_s"][ch_idx], aspect="auto", origin="lower", extent=extent_ds,
-            vmin=L["vmin_dse"], vmax=L["vmax_dse"], cmap="coolwarm"
-        )
+        im2 = ax70.imshow(d["d_s"][ch_idx], aspect="auto", origin="lower", extent=extent_ds,
+                          vmin=L["vmin_dse"], vmax=L["vmax_dse"], cmap="coolwarm")
         ax70.set_title("SHAM — ΔSE (Post – Pre)", fontsize=tfs, pad=6)
-        ax70.set_ylabel("Band", fontsize=lfs)
-        ax70.set_xlabel("Time (s)", fontsize=lfs)
-        ax70.set_yticks(np.arange(len(d["bands"])))
-        ax70.set_yticklabels(d["bands"], fontsize=lfs)
-        ax70.tick_params(labelsize=lfs)
+        ax70.set_ylabel("Band", fontsize=lfs); ax70.set_xlabel("Time (s)", fontsize=lfs)
+        ax70.set_yticks(np.arange(len(d["bands"]))); ax70.set_yticklabels(d["bands"], fontsize=lfs); ax70.tick_params(labelsize=lfs)
         ax70.grid(True, linestyle=':', alpha=0.35)
 
-        im3 = ax71.imshow(
-            d["d_a"][ch_idx], aspect="auto", origin="lower", extent=extent_da,
-            vmin=L["vmin_dse"], vmax=L["vmax_dse"], cmap="coolwarm"
-        )
+        im3 = ax71.imshow(d["d_a"][ch_idx], aspect="auto", origin="lower", extent=extent_da,
+                          vmin=L["vmin_dse"], vmax=L["vmax_dse"], cmap="coolwarm")
         ax71.set_title("ACTIVE — ΔSE (Post – Pre)", fontsize=tfs, pad=6)
-        ax71.set_xlabel("Time (s)", fontsize=lfs)
-        ax71.set_yticks([])
-        ax71.tick_params(labelsize=lfs)
+        ax71.set_xlabel("Time (s)", fontsize=lfs); ax71.set_yticks([]); ax71.tick_params(labelsize=lfs)
         ax71.grid(True, linestyle=':', alpha=0.35)
+        cax3 = make_axes_locatable(ax71).append_axes("right", size="2.8%", pad=0.02)
+        cb3 = fig.colorbar(im3, cax=cax3); cb3.set_label("ΔSE", rotation=90, labelpad=8, fontsize=lfs)
 
-        cax3 = inset_axes(
-            ax71, width="3.5%", height="100%", loc="lower left",
-            bbox_to_anchor=(1.02, 0., 1, 1), bbox_transform=ax71.transAxes, borderpad=0
-        )
-        cb3 = fig.colorbar(im3, cax=cax3)
-        cb3.set_label("ΔSE", rotation=90, labelpad=8, fontsize=lfs)
-        cb3.ax.yaxis.set_label_position("right")
-        cb3.ax.yaxis.tick_right()
-        cb3.ax.tick_params(labelsize=lfs)
-
-        # --- effect bars
-        self._bar_with_ci(
-            ax80, d["bands"], d["eff"][ch_idx], d["lo"][ch_idx], d["hi"][ch_idx],
-            "SE effect [%] (ACTIVE vs SHAM)",
-            "Band-wise Spectral Entropy Effect (median post/pre ratio ± 95% CI)",
-            lfs, tfs
-        )
+        self._bar_with_ci(ax80, d["bands"], d["eff"][ch_idx], d["lo"][ch_idx], d["hi"][ch_idx],
+                          "SE effect [%] (ACTIVE vs SHAM)",
+                          "Band-wise Spectral Entropy Effect (median post/pre ratio ± 95% CI)",
+                          lfs, tfs)
+        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.98)
         return self._canvas_with_toolbar(fig)
 
     def _render_msc(self, ch_idx):
         tfs, lfs = self._fonts["tfs"], self._fonts["lfs"]
+        fig = Figure(figsize=self._sizes["fig"], constrained_layout=True)
+        fig.set_constrained_layout_pads(w_pad=0.05, h_pad=0.05, wspace=0.10, hspace=0.12)
+        gs = fig.add_gridspec(3, 2, height_ratios=[0.9, 0.9, 2.0])
+        ax90  = fig.add_subplot(gs[0,0]); ax91  = fig.add_subplot(gs[0,1])
+        ax100 = fig.add_subplot(gs[1,0]); ax101 = fig.add_subplot(gs[1,1])
+        ax110 = fig.add_subplot(gs[2,:])
 
-        # Figure: disable constrained layout and reserve a small RHS gutter
-        fig = Figure(figsize=self._sizes["fig"], constrained_layout=False)
-        try:
-            fig.set_layout_engine(None)
-        except Exception:
-            pass
-        fig.subplots_adjust(right=0.84)  # ~16% gutter to the right
-
-        # Layout
-        gs = fig.add_gridspec(3, 2, height_ratios=[0.9, 0.9, 2.0], wspace=0.25, hspace=0.30)
-        ax90 = fig.add_subplot(gs[0, 0]);
-        ax91 = fig.add_subplot(gs[0, 1])
-        ax100 = fig.add_subplot(gs[1, 0]);
-        ax101 = fig.add_subplot(gs[1, 1])
-        ax110 = fig.add_subplot(gs[2, :])
-
-        d = self._data["msc"];
-        L = self._limits
-        tb_s = d["tb_s"];
-        tb_a = d["tb_a"]
-        extent_s = [tb_s[0], tb_s[-1], -0.5, len(d["bands"]) - 0.5]
-        extent_a = [tb_a[0], tb_a[-1], -0.5, len(d["bands"]) - 0.5]
-
+        d = self._data["msc"]; L = self._limits
+        tb_s = d["tb_s"]; tb_a = d["tb_a"]
+        extent_s = [tb_s[0], tb_s[-1], -0.5, len(d["bands"])-0.5]
+        extent_a = [tb_a[0], tb_a[-1], -0.5, len(d["bands"])-0.5]
         for ax in (ax90, ax91, ax100, ax101):
             ax.set_axisbelow(True)
 
-        # PRE — SHAM
-        im0 = ax90.imshow(
-            d["pre_s"][ch_idx], aspect="auto", origin="lower", extent=extent_s,
-            vmin=L["vmin_msc"], vmax=L["vmax_msc"], cmap="inferno"
-        )
+        im0 = ax90.imshow(d["pre_s"][ch_idx], aspect="auto", origin="lower", extent=extent_s,
+                          vmin=L["vmin_msc"], vmax=L["vmax_msc"], cmap="inferno")
         ax90.set_title("PRE — SHAM (MSC, mean to others)", fontsize=tfs, pad=6)
         ax90.set_ylabel("Band", fontsize=lfs)
-        ax90.set_yticks(np.arange(len(d["bands"])))
-        ax90.set_yticklabels(d["bands"], fontsize=lfs)
-        ax90.tick_params(labelsize=lfs)
-        ax90.tick_params(labelbottom=False)
+        ax90.set_yticks(np.arange(len(d["bands"]))); ax90.set_yticklabels(d["bands"], fontsize=lfs)
+        ax90.tick_params(labelsize=lfs); ax90.tick_params(labelbottom=False)
         ax90.grid(True, linestyle=':', alpha=0.35)
 
-        # PRE — ACTIVE (colorbar INSIDE the plot area)
-        im1 = ax91.imshow(
-            d["pre_a"][ch_idx], aspect="auto", origin="lower", extent=extent_a,
-            vmin=L["vmin_msc"], vmax=L["vmax_msc"], cmap="inferno"
-        )
+        im1 = ax91.imshow(d["pre_a"][ch_idx], aspect="auto", origin="lower", extent=extent_a,
+                          vmin=L["vmin_msc"], vmax=L["vmax_msc"], cmap="inferno")
         ax91.set_title("PRE — ACTIVE (MSC, mean to others)", fontsize=tfs, pad=6)
-        ax91.set_yticks([])
-        ax91.tick_params(labelsize=lfs)
-        ax91.tick_params(labelbottom=False)
+        ax91.set_yticks([]); ax91.tick_params(labelsize=lfs); ax91.tick_params(labelbottom=False)
         ax91.grid(True, linestyle=':', alpha=0.35)
+        cax1 = make_axes_locatable(ax91).append_axes("right", size="2.8%", pad=0.02)
+        cb1 = fig.colorbar(im1, cax=cax1); cb1.set_label("MSC (0..1)", rotation=90, labelpad=8, fontsize=lfs)
 
-        cax1 = inset_axes(
-            ax91, width="3.5%", height="100%", loc="lower left",
-            bbox_to_anchor=(1.02, 0., 1, 1), bbox_transform=ax91.transAxes, borderpad=0
-        )
-        cb1 = fig.colorbar(im1, cax=cax1)
-        cb1.set_label("MSC (0..1)", rotation=90, labelpad=8, fontsize=lfs)
-        cb1.ax.yaxis.set_label_position("right")
-        cb1.ax.yaxis.tick_right()
-        cb1.ax.tick_params(labelsize=lfs)
+        tb2_s = d["tb2_s"]; tb2_a = d["tb2_a"]
+        extent_ds = [tb2_s[0], tb2_s[-1], -0.5, len(d["bands"])-0.5]
+        extent_da = [tb2_a[0], tb2_a[-1], -0.5, len(d["bands"])-0.5]
 
-        # Δ maps
-        tb2_s = d["tb2_s"];
-        tb2_a = d["tb2_a"]
-        extent_ds = [tb2_s[0], tb2_s[-1], -0.5, len(d["bands"]) - 0.5]
-        extent_da = [tb2_a[0], tb2_a[-1], -0.5, len(d["bands"]) - 0.5]
-
-        im2 = ax100.imshow(
-            d["d_s"][ch_idx], aspect="auto", origin="lower", extent=extent_ds,
-            vmin=L["vmin_dmsc"], vmax=L["vmax_dmsc"], cmap="coolwarm"
-        )
+        im2 = ax100.imshow(d["d_s"][ch_idx], aspect="auto", origin="lower", extent=extent_ds,
+                           vmin=L["vmin_dmsc"], vmax=L["vmax_dmsc"], cmap="coolwarm")
         ax100.set_title("SHAM — ΔMSC % change (Post/Pre)", fontsize=tfs, pad=6)
-        ax100.set_ylabel("Band", fontsize=lfs)
-        ax100.set_xlabel("Time (s)", fontsize=lfs)
-        ax100.set_yticks(np.arange(len(d["bands"])))
-        ax100.set_yticklabels(d["bands"], fontsize=lfs)
-        ax100.tick_params(labelsize=lfs)
+        ax100.set_ylabel("Band", fontsize=lfs); ax100.set_xlabel("Time (s)", fontsize=lfs)
+        ax100.set_yticks(np.arange(len(d["bands"]))); ax100.set_yticklabels(d["bands"], fontsize=lfs); ax100.tick_params(labelsize=lfs)
         ax100.grid(True, linestyle=':', alpha=0.35)
 
-        im3 = ax101.imshow(
-            d["d_a"][ch_idx], aspect="auto", origin="lower", extent=extent_da,
-            vmin=L["vmin_dmsc"], vmax=L["vmax_dmsc"], cmap="coolwarm"
-        )
+        im3 = ax101.imshow(d["d_a"][ch_idx], aspect="auto", origin="lower", extent=extent_da,
+                           vmin=L["vmin_dmsc"], vmax=L["vmax_dmsc"], cmap="coolwarm")
         ax101.set_title("ACTIVE — ΔMSC % change (Post/Pre)", fontsize=tfs, pad=6)
-        ax101.set_xlabel("Time (s)", fontsize=lfs)
-        ax101.set_yticks([])
-        ax101.tick_params(labelsize=lfs)
+        ax101.set_xlabel("Time (s)", fontsize=lfs); ax101.set_yticks([]); ax101.tick_params(labelsize=lfs)
         ax101.grid(True, linestyle=':', alpha=0.35)
+        cax3 = make_axes_locatable(ax101).append_axes("right", size="2.8%", pad=0.02)
+        cb3 = fig.colorbar(im3, cax=cax3); cb3.set_label("ΔMSC [%]", rotation=90, labelpad=8, fontsize=lfs)
 
-        cax3 = inset_axes(
-            ax101, width="3.5%", height="100%", loc="lower left",
-            bbox_to_anchor=(1.02, 0., 1, 1), bbox_transform=ax101.transAxes, borderpad=0
-        )
-        cb3 = fig.colorbar(im3, cax=cax3)
-        cb3.set_label("ΔMSC [%]", rotation=90, labelpad=8, fontsize=lfs)
-        cb3.ax.yaxis.set_label_position("right")
-        cb3.ax.yaxis.tick_right()
-        cb3.ax.tick_params(labelsize=lfs)
-
-        # Effect bars
-        self._bar_with_ci(
-            ax110, d["bands"], d["eff"][ch_idx], d["lo"][ch_idx], d["hi"][ch_idx],
-            "MSC effect [%] (ACTIVE vs SHAM)",
-            "Band-wise MSC Effect (median post/pre ratio ± 95% CI)",
-            lfs, tfs
-        )
+        self._bar_with_ci(ax110, d["bands"], d["eff"][ch_idx], d["lo"][ch_idx], d["hi"][ch_idx],
+                          "MSC effect [%] (ACTIVE vs SHAM)",
+                          "Band-wise MSC Effect (median post/pre ratio ± 95% CI)",
+                          lfs, tfs)
+        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.98)
         return self._canvas_with_toolbar(fig)
-
-    from matplotlib.ticker import MaxNLocator
-
-    from matplotlib.ticker import MaxNLocator
 
     def _render_ego(self, ch_idx):
         # Treatment EFFECT (Active vs Sham) Δ% per band — single row
         bands = self._ego["bands"]
         matsE = self._ego["mats_effect"]
-        vmin = float(self._ego["edge_vmin"])
-        vmax = float(self._ego["edge_vmax"])
+        vmin  = float(self._ego["edge_vmin"])
+        vmax  = float(self._ego["edge_vmax"])
         vmax_abs = max(abs(vmin), abs(vmax)) or 1.0
         vmin, vmax = -vmax_abs, +vmax_abs
 
         B = len(bands)
         W = max(self._sizes["fig"][0], 3.6 * max(3, B))
         H = max(self._sizes["fig"][1], 5.2)
-
         fig = Figure(figsize=(W, H), constrained_layout=True)
         fig.set_constrained_layout_pads(w_pad=0.05, h_pad=0.06, wspace=0.10, hspace=0.14)
 
-        pos = self._ego["pos"]
+        pos   = self._ego["pos"]
         names = self._ch_names
         gs = fig.add_gridspec(1, B, wspace=0.10, hspace=0.14)
 
         norm = matplotlib.colors.TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
         cmap = plt.get_cmap("coolwarm")
 
-        axs = []
         for bi, bn in enumerate(bands):
-            ax = fig.add_subplot(gs[0, bi]);
-            axs.append(ax)
-            ax.set_axisbelow(True)
+            ax = fig.add_subplot(gs[0, bi]); ax.set_axisbelow(True)
 
             D = np.asarray(matsE[bi], float)
             w = D[ch_idx, :].copy()
@@ -1258,8 +978,7 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
                 cols_arr = cmap(norm(w[idx]))
                 rel = np.clip(np.abs(w[idx]) / (vmax_abs + 1e-12), 0.0, 1.0)
                 lws = 1.0 + 6.0 * rel
-                lc = LineCollection(segs, colors=cols_arr, linewidths=lws,
-                                    alpha=0.98, zorder=1, capstyle='round')
+                lc = LineCollection(segs, colors=cols_arr, linewidths=lws, alpha=0.98, zorder=1, capstyle='round')
                 ax.add_collection(lc)
 
             # nodes
@@ -1271,8 +990,7 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
             neighbor_set = set(idx.tolist())
             for k, nm in enumerate(names):
                 x, y = pos[k, 0], pos[k, 1]
-                is_ego = (k == ch_idx);
-                is_neighbor = (k in neighbor_set)
+                is_ego = (k == ch_idx); is_neighbor = (k in neighbor_set)
                 fs = 8 if (is_neighbor or is_ego) else 7
                 weight = "bold" if (is_neighbor or is_ego) else "normal"
                 alpha = 1.0 if (is_neighbor or is_ego) else 0.8
@@ -1281,56 +999,18 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
                               alpha=alpha, ha="center", va="center", zorder=4)
                 txt.set_path_effects([pe.withStroke(linewidth=2.0, foreground="black")])
 
-            ax.set_title(f"{bn}", fontsize=10, pad=6)
-            ax.set_xticks([]);
-            ax.set_yticks([])
+            ax.set_title(f"{bn} — EFFECT ΔMSC % (Active/Sham)", fontsize=10, pad=6)
+            ax.set_xticks([]); ax.set_yticks([])
             ax.set_aspect("equal", adjustable="box")
-            ax.set_xlim(pos[:, 0].min() - 0.05, pos[:, 0].max() + 0.05)
-            ax.set_ylim(pos[:, 1].min() - 0.05, pos[:, 1].max() + 0.05)
+            ax.set_xlim(pos[:,0].min()-0.05, pos[:,0].max()+0.05)
+            ax.set_ylim(pos[:,1].min()-0.05, pos[:,1].max()+0.05)
             ax.grid(True, linestyle=':', alpha=0.25)
 
-        # ---------- Colorbar: freeze layout, then add beside last subplot ----------
-        sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap);
-        sm.set_array([])
+        sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
+        cb = fig.colorbar(sm, ax=fig.axes, fraction=0.035, pad=0.02)
+        cb.set_label("EFFECT ΔMSC [%]", rotation=90, labelpad=7, fontsize=9)
 
-        # 1) finalize constrained layout once
-        try:
-            fig.canvas.draw()
-        except Exception:
-            pass
-
-        # 2) FREEZE positions so adding cbar won't trigger another layout pass
-        fig.set_constrained_layout(False)
-        for ax in axs:
-            ax.set_position(ax.get_position())  # write back the current bbox
-
-        # 3) place cbar strictly to the RIGHT of the last axes, same height
-        ax_last = axs[-1]
-        bbox = ax_last.get_position()  # figure fraction coords
-
-        pad = 0.015  # gap from last axes
-        cbar_w = 0.032  # thickness of bar
-        left = bbox.x1 + pad
-        # keep inside the figure; if tight, shrink bar but NEVER cross into last axes
-        max_left = 0.995 - cbar_w
-        if left > max_left:
-            cbar_w = max(0.022, 0.995 - left)
-
-        bottom = bbox.y0
-        height = bbox.height
-
-        cax = fig.add_axes([left, bottom, cbar_w, height])
-        cax.set_in_layout(False)  # ensure no future layout touches it
-
-        cb = fig.colorbar(sm, cax=cax)
-        cb.ax.tick_params(labelsize=9, width=1.0, length=3.5)
-        cb.set_label("EFFECT ΔMSC [%]", rotation=90, labelpad=7, fontsize=10)
-
-        # symmetric ticks centered at 0 (optional)
-        ticks = np.linspace(-vmax_abs, vmax_abs, 5)
-        cb.set_ticks(ticks)
-        cb.ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
-
+        fig.suptitle(self._ch_names[ch_idx], fontsize=12, fontweight="bold", y=0.995)
         return self._canvas_with_toolbar(fig)
 
     def _render_ego_bars(self, ch_idx):
@@ -1402,9 +1082,9 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
             ax.set_yticks(y)
             ax.set_yticklabels([names[j] for j in idx], fontsize=8)
             ax.invert_yaxis()
-            ax.set_title(f"{bn}", fontsize=10, pad=6)
-            # if bi == 0:
-            #     ax.set_xlabel("ΔMSC effect [%]  (Active / Sham)")
+            ax.set_title(f"{bn} — EFFECT ΔMSC %", fontsize=10, pad=6)
+            if bi == 0:
+                ax.set_xlabel("ΔMSC effect [%]  (Active / Sham)")
 
             # ensure entire error bar visible (symmetric around 0 with padding)
             band_max = np.nanmax(np.maximum(np.abs(lo), np.abs(hi))) if lo.size else 1.0
@@ -1418,50 +1098,31 @@ class SinglePanelViewer(QtWidgets.QMainWindow):
 
         sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
         cb = fig.colorbar(sm, ax=fig.axes, fraction=0.035, pad=0.02)
-        # add a label + keep it readable on the right
-        cb.set_label("ΔMSC effect [%] (color = signed % change)", rotation=90, labelpad=10)
-        cb.ax.yaxis.set_label_position('right')
-        cb.ax.yaxis.tick_right()
-        cb.ax.tick_params(labelsize=9)
+        cb.set_label("EFFECT ΔMSC [%]", rotation=90, labelpad=7, fontsize=9)
 
-        # fig.suptitle(f"{self._ch_names[ch_idx]} — Ego edges (bars with 95% CI)", fontsize=12, fontweight="bold", y=0.995)
+        fig.suptitle(f"{self._ch_names[ch_idx]} — Ego edges (bars with 95% CI)", fontsize=12, fontweight="bold", y=0.995)
         return self._canvas_with_toolbar(fig)
 
     def render_panel(self):
-        if getattr(self, '_rendering', False):
-            return
-        self._rendering = True
-        try:
-            # Clear previous plot
-            if hasattr(self, '_clear_plot_layout'):
-                self._clear_plot_layout()
+        while self._plot_layout.count():
+            w = self._plot_layout.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
 
-            while self._plot_layout.count():
-                w = self._plot_layout.takeAt(0).widget()
-                if w is not None:
-                    w.deleteLater()
+        ch_idx = self.cb_chan.currentIndex()
+        feat = self.cb_feat.currentText()
 
-            ch_idx = self.cb_chan.currentIndex()
-            feat = self.cb_feat.currentText()
+        if feat == "Power":
+            widget = self._render_power(ch_idx)
+        elif feat == "PLV":
+            widget = self._render_plv(ch_idx)
+        elif feat == "Entropy":
+            widget = self._render_se(ch_idx)
+        elif feat == "Coherence":
+            widget = self._render_msc(ch_idx)
+        elif feat == "Ego bars":
+            widget = self._render_ego_bars(ch_idx)
+        else:
+            widget = self._render_ego(ch_idx)
 
-            if feat == "Power":
-                widget = self._render_power(ch_idx)
-            elif feat == "PLV":
-                widget = self._render_plv(ch_idx)
-            elif feat == "Entropy":
-                widget = self._render_se(ch_idx)
-            elif feat == "Coherence":
-                widget = self._render_msc(ch_idx)
-            elif feat == "Ego bars":
-                widget = self._render_ego_bars(ch_idx)
-            else:
-                widget = self._render_ego(ch_idx)
-
-            self._plot_layout.addWidget(widget)
-
-        except Exception as e:
-            print("Failure:", e)
-
-        finally:
-            self._rendering = False
-
+        self._plot_layout.addWidget(widget)
